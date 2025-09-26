@@ -1,0 +1,7 @@
+scrapy==2.11.*
+scrapy-playwright==0.0.33
+playwright==1.46.*
+supabase==2.*
+uvicorn==0.30.*
+fastapi==0.115.*
+filelock==3.15.*
