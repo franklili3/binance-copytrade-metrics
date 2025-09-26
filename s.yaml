@@ -1,0 +1,41 @@
+edition: 1.0.0
+name: money2x-spider
+access: default
+
+services:
+  money2x:
+    component: fc
+    props:
+      region: cn-hangzhou
+      service:
+        name: money2x-svc
+        description: money2x copy-trade spider
+        internetAccess: true
+      function:
+        name: copy-trade-func
+        description: spider container
+        memorySize: 1024
+        timeout: 600
+        cpu: 0.5
+        instanceType: c1
+        runtime: custom-container
+        customContainerConfig:
+          image: registry.cn-hangzhou.aliyuncs.com/<namespace>/money2x-spider:latest
+          port: 9000
+        environmentVariables:
+          SUPABASE_URL: ${env(SUPABASE_URL)}
+          SUPABASE_KEY: ${env(SUPABASE_KEY)}
+          SUPABASE_TABLE: copy_trade
+      triggers:
+        - name: http
+          type: http
+          config:
+            authType: anonymous
+            methods: [ GET, POST ]
+
+        - name: daily-0800
+          type: timer
+          config:
+            cronExpression: '0 0 8 * * *'
+            enable: true
+            payload: '{}'
