@@ -1,0 +1,70 @@
+{
+  "statefulConfig": {
+    "functionId": "040dc21c-f2ff-4ad5-a064-f8fdc58945b8",
+    "functionName": "dev-serverless-cd-runner",
+    "description": "Initialize",
+    "runtime": "custom.debian10",
+    "handler": "index.handler",
+    "timeout": 300,
+    "initializer": "",
+    "initializationTimeout": 3,
+    "codeSize": 45735,
+    "codeChecksum": "4968556422354435399",
+    "memorySize": 1024,
+    "gpuMemorySize": null,
+    "cpu": 0.25,
+    "diskSize": 10240,
+    "environmentVariables": {
+      "COPY_TRADE_ONLY": "0",
+      "PATH": "/var/fc/lang/python3.10/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/bin",
+      "PYTHONPATH": "/opt/python",
+      "SUPABASE_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlodWpya21hYXFwd2J0cHJsdW5wIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzY3NDU4MDEsImV4cCI6MjA1MjMyMTgwMX0.jKLZQACvO3ayiZ-Iqic5rEAcVOKa5kHDXvBKdkRq1Iw",
+      "SUPABASE_URL": "https://yhujrkmaaqpwbtprlunp.supabase.co"
+    },
+    "createdTime": "2025-09-27T11:00:04Z",
+    "lastModifiedTime": "2025-09-27T11:38:09Z",
+    "instanceConcurrency": 1,
+    "instanceSoftConcurrency": null,
+    "customContainerConfig": null,
+    "caPort": 9000,
+    "instanceType": "e1",
+    "layers": [
+      "deeec0ab23d3059b9fa85a02571fa4bb#certifi-selenium-beautifulsoup4#1",
+      "deeec0ab23d3059b9fa85a02571fa4bb#supabase#1",
+      "deeec0ab23d3059b9fa85a02571fa4bb#pandas#1",
+      "deeec0ab23d3059b9fa85a02571fa4bb#libnss3#3",
+      "d3fc5de8d120687be2bfab761518d5de#Python310-Package-Collection#4"
+    ],
+    "layersArnV2": [
+      "acs:fc:cn-hongkong:1607116984302096:layers/certifi-selenium-beautifulsoup4/versions/1",
+      "acs:fc:cn-hongkong:1607116984302096:layers/supabase/versions/1",
+      "acs:fc:cn-hongkong:1607116984302096:layers/pandas/versions/1",
+      "acs:fc:cn-hongkong:1607116984302096:layers/libnss3/versions/3",
+      "acs:fc:cn-hongkong:official:layers/Python310-Package-Collection/versions/4"
+    ],
+    "instanceLifecycleConfig": {
+      "preFreeze": {
+        "handler": "",
+        "timeout": 3,
+        "command": null
+      },
+      "preStop": {
+        "handler": "",
+        "timeout": 3,
+        "command": null
+      }
+    },
+    "customDNS": null,
+    "customRuntimeConfig": {
+      "command": [
+        "python3",
+        "/code/index.py"
+      ],
+      "args": null
+    },
+    "customHealthCheckConfig": null,
+    "sessionAffinity": null,
+    "initializerCommand": null,
+    "name": "dev-serverless-cd-runner"
+  }
+}

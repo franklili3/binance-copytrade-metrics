@@ -1,0 +1,45 @@
+{
+  "statefulConfig": {
+    "serviceName": "dev-bitcoin-etf-usd-flow",
+    "description": "",
+    "role": "acs:ram::1607116984302096:role/aliyunfcdefaultrole",
+    "logConfig": {
+      "project": "serverless-cn-hongkong-a7cb6260-544e-5600-9d44-132520a68dbc",
+      "logstore": "default-logs",
+      "enableRequestMetrics": true,
+      "enableInstanceMetrics": true,
+      "logBeginRule": "DefaultRegex",
+      "enableCustomExtraLog": true
+    },
+    "serviceId": "2eadb5c2-c9ef-4d34-b49b-fe71a1feffb6",
+    "createdTime": "2025-08-14T09:35:08Z",
+    "lastModifiedTime": "2025-09-27T11:38:09Z",
+    "vpcConfig": {
+      "vpcId": "",
+      "vSwitchIds": [],
+      "securityGroupId": "",
+      "role": null,
+      "anytunnelViaENI": null
+    },
+    "internetAccess": true,
+    "nasConfig": {
+      "userId": -1,
+      "groupId": -1,
+      "mountPoints": []
+    },
+    "ossMountConfig": {
+      "mountPoints": []
+    },
+    "vendorConfig": null,
+    "tracingConfig": {
+      "type": null,
+      "params": null,
+      "jaegerConfig": null
+    },
+    "useSLRAuthentication": false,
+    "name": "dev-bitcoin-etf-usd-flow"
+  },
+  "statefulAutoConfig": {
+    "role": "acs:ram::1607116984302096:role/aliyunfcdefaultrole"
+  }
+}
