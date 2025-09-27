@@ -2608,10 +2608,6 @@ import shutil
 from lxml import etree
 
 # Import the scraper classes
-from bitcoin_etf_scraper import BitcoinETFScraper, setup_shared_driver
-from binance_copy_trade_scraper import BinanceCopyTradeScraper
-from serverless_bitcoin_etf_scraper import BitcoinETFScraper as ServerlessBitcoinETFScraper
-from serverless_binance_scraper import BinanceCopyTradeScraper as ServerlessBinanceCopyTradeScraper
 
 # In serverless environments, use /tmp for writable storage
 # 但在阿里云函数计算平台，我们也需要支持项目目录下的chromedriver

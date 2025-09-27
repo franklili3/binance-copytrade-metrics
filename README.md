@@ -39,8 +39,7 @@ scrapy.cfg
 2. **本地运行一次爬虫**（需网络可访问 Binance）
 
    ```bash
-   scrapy crawl copy_trade \
-     -a lead_url="https://www.binance.com/zh-CN/copy-trading/lead-details/4458914342020236800?timeRange=180D"
+   scrapy crawl copy_trade -a lead_url="https://www.binance.com/zh-CN/copy-trading/lead-details/4458914342020236800?timeRange=180D"
    ```
 
    运行结束后检查 `output/copy_traders.json`，确认字段均不为空且不为 0。
