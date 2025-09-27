@@ -32,6 +32,19 @@ APP_DATA_SELECTORS = [
 
 JSON_FALLBACK_PATTERN = re.compile(r"__APP_DATA__\s*=\s*(\{.*?\})\s*;\s*</script>", re.S)
 
+# Additional JSON array extraction patterns derived from the working Selenium
+# implementation in ``bitcoin-etf-usd-flow/serverless.py``. These cover the
+# different inline data structures that Binance may expose inside the rendered
+# HTML when the ``__APP_DATA__`` script is unavailable or incomplete. Using a
+# small curated list keeps the regexes fast while still being resilient to
+# markup changes.
+JSON_ARRAY_PATTERNS = [
+    re.compile(r"\"copyTraderList\"\s*:\s*(\[(?:\s*\{.*?\}\s*,?)+\])", re.S),
+    re.compile(r"\"copyUserList\"\s*:\s*(\[(?:\s*\{.*?\}\s*,?)+\])", re.S),
+    re.compile(r"\[(\{[^\]]+\"copyTraderId\".*?\})\]", re.S),
+    re.compile(r"\[(\{[^\]]+\"uid\".*?\})\]", re.S),
+]
+
 
 class CopyTradeSpider(scrapy.Spider):
     name = "copy_trade"
@@ -125,6 +138,7 @@ class CopyTradeSpider(scrapy.Spider):
     def _extract_records(self, response) -> list[dict]:
         html = response.text
         data = self._extract_app_data(response)
+        records: list[dict] = []
         if data is None:
             match = JSON_FALLBACK_PATTERN.search(html)
             if match:
@@ -134,18 +148,21 @@ class CopyTradeSpider(scrapy.Spider):
                 except json.JSONDecodeError:
                     data = None
 
-        if data is None:
+        if data is not None:
+            for candidate in self._iter_candidates(data):
+                if isinstance(candidate, dict):
+                    maybe_list = self._normalise_list_container(candidate)
+                    if maybe_list:
+                        records.extend(maybe_list)
+                elif isinstance(candidate, list):
+                    records.extend(candidate)
+
+        if not records:
+            records.extend(self._extract_json_records_from_html(html))
+
+        if not records:
             self.logger.error("Unable to locate Binance app data in rendered HTML")
             return []
-
-        records: list[dict] = []
-        for candidate in self._iter_candidates(data):
-            if isinstance(candidate, dict):
-                maybe_list = self._normalise_list_container(candidate)
-                if maybe_list:
-                    records.extend(maybe_list)
-            elif isinstance(candidate, list):
-                records.extend(candidate)
 
         unique_records: dict[str, dict] = {}
         for record in records:
@@ -159,6 +176,31 @@ class CopyTradeSpider(scrapy.Spider):
             if identifier and identifier not in unique_records and self._looks_like_record(record):
                 unique_records[identifier] = record
         return list(unique_records.values())
+
+    def _extract_json_records_from_html(self, html: str) -> list[dict]:
+        records: list[dict] = []
+        seen_snippets: set[str] = set()
+        for pattern in JSON_ARRAY_PATTERNS:
+            for match in pattern.finditer(html):
+                snippet = match.group(0)
+                if snippet in seen_snippets:
+                    continue
+                seen_snippets.add(snippet)
+                array_match = re.search(r"\[\s*\{.*?\}\s*\]", snippet, flags=re.S)
+                if not array_match:
+                    continue
+                array_text = array_match.group(0)
+                try:
+                    parsed = json.loads(array_text)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict):
+                    parsed = [parsed]
+                if isinstance(parsed, list):
+                    for entry in parsed:
+                        if isinstance(entry, dict):
+                            records.append(entry)
+        return records
 
     def _extract_app_data(self, response) -> Optional[dict]:
         for selector in APP_DATA_SELECTORS:
