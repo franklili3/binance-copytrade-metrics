@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import re
-from contextlib import suppress
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, urlparse
 
 import scrapy
+from parsel import Selector
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from scrapy.exceptions import CloseSpider
-from scrapy.selector import Selector
 from scrapy_playwright.page import PageMethod
 
 from money2x_spider.items import (
@@ -24,7 +23,7 @@ DEFAULT_LEAD_URL = (
     "https://www.binance.com/zh-CN/copy-trading/lead-details/4458914342020236800?timeRange=180D"
 )
 
-TIME_RANGE_TO_DAYS = {
+TIME_RANGE_TO_DAYS: Dict[str, int] = {
     "7D": 7,
     "30D": 30,
     "90D": 90,
@@ -32,29 +31,37 @@ TIME_RANGE_TO_DAYS = {
     "365D": 365,
 }
 
-APP_DATA_SELECTORS = [
+APP_DATA_SELECTORS: Sequence[str] = (
     "script#__APP_DATA::text",
     "script#__APP_STATE::text",
     "script[id='__APP_DATA']::text",
     "script[type='application/json']::text",
-]
+)
 
 JSON_FALLBACK_PATTERN = re.compile(r"__APP_DATA__\s*=\s*(\{.*?\})\s*;\s*</script>", re.S)
-COPY_TRADER_ENDPOINT_RE = re.compile(r"/bapi/.*/lead-copy-traders/", re.I)
-COPY_TRADER_BUTTON_SELECTORS = [
-    "button:has-text('复制交易员')",
-    "button:has-text('Copy traders')",
-    "div[data-bn-type='button']:has-text('复制交易员')",
-    "div[data-bn-type='button']:has-text('Copy traders')",
-]
-NEXT_BUTTON_SELECTORS = [
-    "button:has-text('下一页')",
-    "button[aria-label='Next']",
-    "button:has-text('Next')",
-    "a[aria-label='Next']",
-]
-RESPONSE_TIMEOUT_MS = 60000
-MAX_PAGES = 100
+
+COPY_TRADER_TAB_XPATHS: Sequence[str] = (
+    "//button[normalize-space()='Copy Traders']",
+    "//div[@role='tab' and normalize-space()='Copy Traders']",
+    "//div[contains(@class,'tab')][.//text()[normalize-space()='Copy Traders']]",
+    "//span[@role='tab' and normalize-space()='Copy Traders']",
+    "//*[self::button or self::div or self::span][contains(normalize-space(), 'Copy Traders') and @role='tab']",
+)
+
+NEXT_BUTTON_XPATHS: Sequence[str] = (
+    "//button[normalize-space()='Next' and not(@disabled)]",
+    "//button[contains(., '下一页') and not(@disabled)]",
+    "//button[contains(., 'Load more') and not(@disabled)]",
+    "//a[@rel='next' and not(contains(@aria-disabled,'true'))]",
+    "//li[contains(@class,'next')]//button[not(@disabled)]",
+    "//li[contains(@class,'next')]//a[not(contains(@aria-disabled,'true'))]",
+)
+
+USDT_PATTERN = re.compile(r"([+\-]?\d[\d,]*(?:\.\d+)?)\s*USDT", re.I)
+PERCENT_PATTERN = re.compile(r"([+\-]?\d[\d,]*(?:\.\d+)?)\s*%")
+DURATION_PATTERN = re.compile(r"(\d+)\s*D", re.I)
+INTEGER_PATTERN = re.compile(r"(\d+)")
+MAX_PAGES = 12
 
 
 class CopyTradeSpider(scrapy.Spider):
@@ -72,7 +79,7 @@ class CopyTradeSpider(scrapy.Spider):
         }
     }
 
-    def __init__(self, lead_url: Optional[str] = None, **kwargs):
+    def __init__(self, lead_url: Optional[str] = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.lead_url = lead_url or DEFAULT_LEAD_URL
         (
@@ -133,177 +140,235 @@ class CopyTradeSpider(scrapy.Spider):
             except PlaywrightTimeoutError:
                 self.logger.warning("Timed out waiting for network idle; continuing")
 
-            app_data = await self._extract_app_data(page)
+            html = await page.content()
+            app_data = self._extract_app_data_from_html(html)
             if app_data:
                 overview_item = self._build_overview_item(app_data)
                 if overview_item:
+                    self._validate_overview(overview_item)
                     yield overview_item
                 for perf_item in self._build_performance_items(app_data):
+                    self._validate_performance(perf_item)
                     yield perf_item
             else:
                 self.logger.warning("Unable to locate Binance app data in rendered HTML")
 
-            async for follower in self._collect_copy_traders(page):
-                yield follower
-        finally:
-            with suppress(Exception):
-                await page.close()
+            await self._open_copy_trader_tab(page)
 
-    async def _collect_copy_traders(self, page):
-        seen_pages: set[int] = set()
-        total_pages: Optional[int] = None
-        first_click = True
-        pages_processed = 0
-        button = await self._query_first(page, COPY_TRADER_BUTTON_SELECTORS)
-        if button is None:
-            raise CloseSpider("Copy trader button not found")
-
-        while pages_processed < MAX_PAGES:
-            wait_task = asyncio.create_task(
-                page.wait_for_response(
-                    lambda resp: bool(
-                        resp is not None
-                        and resp.url
-                        and COPY_TRADER_ENDPOINT_RE.search(resp.url)
-                    ),
-                    timeout=RESPONSE_TIMEOUT_MS,
-                )
-            )
-
-            if first_click:
-                await button.click()
-                first_click = False
-            else:
-                clicked = await self._click_next(page)
-                if not clicked:
-                    wait_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await wait_task
+            seen_ids: set[str] = set()
+            last_html = ""
+            for _ in range(MAX_PAGES):
+                page_html = await page.content()
+                if page_html == last_html:
                     break
+                last_html = page_html
+                for record in self._extract_copy_traders_from_html(page_html):
+                    if record["user_id"] in seen_ids:
+                        continue
+                    seen_ids.add(record["user_id"])
+                    item = self._build_follower_item(record)
+                    if item is not None:
+                        yield item
 
-            response = await self._await_response(wait_task)
-            if response is None:
-                break
+                if not await self._click_next(page):
+                    break
+                await page.wait_for_timeout(900)
 
-            payload = await self._decode_payload(response)
-            if payload is None:
+            if not seen_ids:
+                raise CloseSpider("No copy traders parsed from DOM")
+        finally:
+            try:
+                await page.close()
+            except PlaywrightError:
+                pass
+
+    async def _open_copy_trader_tab(self, page) -> None:
+        for xpath in COPY_TRADER_TAB_XPATHS:
+            locator = page.locator(f"xpath={xpath}")
+            try:
+                if await locator.count() == 0:
+                    continue
+                handle = locator.first
+                if not await handle.is_visible():
+                    continue
+                aria_selected = await handle.get_attribute("aria-selected")
+                if aria_selected == "true":
+                    return
+                try:
+                    await handle.click()
+                    await page.wait_for_timeout(600)
+                    return
+                except PlaywrightError as exc:
+                    self.logger.debug("Failed to click copy trader tab via %s: %s", xpath, exc)
+                    continue
+            except PlaywrightError:
                 continue
 
-            records, page_no, page_total = self._extract_copy_trader_records(payload)
-            if page_no is not None:
-                if page_no in seen_pages:
-                    if total_pages and len(seen_pages) >= total_pages:
-                        break
-                    continue
-                seen_pages.add(page_no)
-
-            if page_total is not None:
-                total_pages = page_total
-
-            yielded = False
-            for record in records:
-                item = self._build_follower_item(record)
-                if item is not None:
-                    yielded = True
-                    yield item
-
-            pages_processed += 1
-
-            if total_pages is not None and page_no is not None and page_no >= total_pages:
-                break
-
-            if not yielded and total_pages is None:
-                self.logger.debug(
-                    "Copy trader payload for page %s contained no usable records", page_no
-                )
-
-            await page.wait_for_timeout(300)
-
-    async def _await_response(self, wait_task: asyncio.Task):
-        try:
-            return await wait_task
-        except PlaywrightTimeoutError:
-            self.logger.error("Timed out waiting for copy trader response")
-        except asyncio.CancelledError:
-            return None
-        except Exception as exc:  # pragma: no cover - defensive
-            self.logger.error("Unexpected error waiting for response: %s", exc)
-        return None
-
-    async def _decode_payload(self, response):
-        try:
-            return await response.json()
-        except Exception:
-            try:
-                text = await response.text()
-            except Exception:
-                return None
-            try:
-                return json.loads(text)
-            except json.JSONDecodeError:
-                self.logger.error("Failed to decode copy trader payload from %s", response.url)
-                return None
-
     async def _click_next(self, page) -> bool:
-        for selector in NEXT_BUTTON_SELECTORS:
-            handles = await page.query_selector_all(selector)
-            for handle in handles:
-                try:
-                    if not await handle.is_enabled():
-                        continue
-                    await handle.click()
-                    await page.wait_for_timeout(200)
-                    return True
-                except PlaywrightTimeoutError:
+        for xpath in NEXT_BUTTON_XPATHS:
+            locator = page.locator(f"xpath={xpath}")
+            try:
+                if await locator.count() == 0:
                     continue
-                except Exception as exc:  # pragma: no cover - defensive
-                    self.logger.debug("Failed to click next button %s: %s", selector, exc)
+                handle = locator.first
+                if not await handle.is_visible():
+                    continue
+                disabled = await handle.get_attribute("disabled")
+                if disabled is not None:
+                    continue
+                aria_disabled = await handle.get_attribute("aria-disabled")
+                if aria_disabled and aria_disabled.lower() == "true":
+                    continue
+                try:
+                    await handle.click()
+                    return True
+                except PlaywrightError as exc:
+                    self.logger.debug("Failed to click next button via %s: %s", xpath, exc)
+                    continue
+            except PlaywrightError:
+                continue
         return False
 
-    async def _query_first(self, page, selectors):
-        for selector in selectors:
-            handle = await page.query_selector(selector)
-            if handle is not None:
-                return handle
+    def _extract_copy_traders_from_html(self, html: str) -> List[Dict[str, Any]]:
+        selector = Selector(text=html)
+        records: List[Dict[str, Any]] = []
+        row_nodes = selector.xpath(
+            "//table//tbody/tr"
+            " | //table//tr[td]"
+            " | //*[@role='rowgroup']/*[@role='row']"
+            " | //*[@role='row' and not(ancestor::*[@aria-hidden='true'])]"
+            " | //div[contains(@class,'table-row') or contains(@class,'bn-table-row')][.//div]"
+        )
+        for node in row_nodes:
+            payload = self._parse_row(node)
+            if payload is not None:
+                records.append(payload)
+        return records
+
+    def _parse_row(self, node: Selector) -> Optional[Dict[str, Any]]:
+        text_content = " ".join(node.xpath(".//text()").getall()).strip()
+        if not text_content or len(text_content) < 6:
+            return None
+        if any(
+            header in text_content
+            for header in ("User ID", "Amount", "Total ROI", "Duration", "Total PNL")
+        ) and not USDT_PATTERN.search(text_content):
+            return None
+
+        user_id = (
+            node.xpath("normalize-space(.//td[1])").get()
+            or node.xpath("normalize-space(.//*[@role='cell'][1])").get()
+            or node.xpath("normalize-space(.//a[contains(@href,'lead-details')])").get()
+        )
+        if not user_id:
+            return None
+
+        amount_text = (
+            node.xpath("string(.//td[2])").get()
+            or node.xpath("string(.//*[@role='cell'][2])").get()
+            or ""
+        )
+        pnl_text = (
+            node.xpath("string(.//td[3])").get()
+            or node.xpath("string(.//*[@role='cell'][3])").get()
+            or ""
+        )
+        roi_text = (
+            node.xpath("string(.//td[4])").get()
+            or node.xpath("string(.//*[@role='cell'][4])").get()
+            or ""
+        )
+        duration_text = (
+            node.xpath("string(.//td[5])").get()
+            or node.xpath("string(.//*[@role='cell'][5])").get()
+            or ""
+        )
+
+        amount = self._parse_usdt(amount_text) or self._parse_usdt(text_content)
+        total_pnl = self._parse_usdt(pnl_text) or self._parse_usdt(text_content)
+        total_roi = self._parse_percent(roi_text) or self._parse_percent(text_content)
+        duration = self._parse_duration(duration_text) or self._parse_duration(text_content)
+
+        if None in (amount, total_pnl, total_roi, duration):
+            return None
+        if any(value == 0 for value in (amount, total_pnl, total_roi, duration)):
+            return None
+
+        return {
+            "lead_trader_id": self.lead_trader_id,
+            "user_id": str(user_id),
+            "amount": amount,
+            "total_pnl": total_pnl,
+            "total_roi": total_roi,
+            "duration": int(duration),
+            "created_date": self.scraped_date,
+        }
+
+    def _parse_usdt(self, value: str) -> Optional[float]:
+        if not value:
+            return None
+        match = USDT_PATTERN.search(value)
+        if match:
+            return float(match.group(1).replace(",", ""))
+        cleaned = value.strip().replace(",", "")
+        if cleaned and cleaned.replace(".", "", 1).replace("-", "", 1).isdigit():
+            try:
+                return float(cleaned)
+            except ValueError:
+                return None
         return None
 
-    def _extract_copy_trader_records(
-        self, payload: Dict[str, Any]
-    ) -> Tuple[list[Dict[str, Any]], Optional[int], Optional[int]]:
-        records: list[Dict[str, Any]] = []
-        page_no = self._extract_page_number(payload)
-        total_pages = self._extract_total_pages(payload)
+    def _parse_percent(self, value: str) -> Optional[float]:
+        if not value:
+            return None
+        match = PERCENT_PATTERN.search(value)
+        if match:
+            return float(match.group(1).replace(",", ""))
+        return None
 
-        for candidate in self._iter_objects(payload):
-            if isinstance(candidate, dict):
-                for key in ("copyTraderList", "list", "rows", "items", "data"):
-                    value = candidate.get(key)
-                    if isinstance(value, list) and all(isinstance(v, dict) for v in value):
-                        records = value
-                        if page_no is None:
-                            page_no = self._parse_int(
-                                candidate.get("page")
-                                or candidate.get("pageNo")
-                                or candidate.get("pageIndex")
-                                or candidate.get("currentPage")
-                            )
-                        if total_pages is None:
-                            total_pages = self._parse_int(
-                                candidate.get("totalPage")
-                                or candidate.get("pageCount")
-                                or candidate.get("pages")
-                                or candidate.get("totalPages")
-                            )
-                        return records, page_no, total_pages
+    def _parse_duration(self, value: str) -> Optional[int]:
+        if not value:
+            return None
+        match = DURATION_PATTERN.search(value)
+        if match:
+            return int(match.group(1))
+        match = INTEGER_PATTERN.search(value)
+        if match:
+            return int(match.group(1))
+        return None
 
-        return records, page_no, total_pages
+    def _extract_app_data_from_html(self, html: str) -> Optional[Dict[str, Any]]:
+        selector = Selector(text=html)
+        for script_selector in APP_DATA_SELECTORS:
+            for script in selector.css(script_selector).getall():
+                data = (script or "").strip()
+                if not data:
+                    continue
+                try:
+                    parsed = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict):
+                    return parsed
+        match = JSON_FALLBACK_PATTERN.search(html)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except json.JSONDecodeError:
+                return None
+        return None
 
     def _build_overview_item(self, app_data: Dict[str, Any]) -> Optional[CopyTradeOverviewItem]:
         copiers = self._parse_int(
-            self._find_first(app_data, ["totalCopyTraders", "copyTraderCount", "copyCount", "followers"])
+            self._find_first(
+                app_data,
+                ["totalCopyTraders", "copyTraderCount", "copyCount", "followers"],
+            )
         )
         aum = self._parse_number(
-            self._find_first(app_data, ["aum", "aumInUsdt", "aumValue", "aumUsd"])
+            self._find_first(
+                app_data, ["aum", "aumInUsdt", "aumValue", "aumUsd"]
+            )
         )
         balance = self._parse_number(
             self._find_first(
@@ -312,7 +377,9 @@ class CopyTradeSpider(scrapy.Spider):
             )
         )
         mock = self._parse_int(
-            self._find_first(app_data, ["mockCopyTraders", "mockCopiers", "mockCopyCount"])
+            self._find_first(
+                app_data, ["mockCopyTraders", "mockCopiers", "mockCopyCount"]
+            )
         )
 
         if copiers is None or aum is None or balance is None:
@@ -329,7 +396,9 @@ class CopyTradeSpider(scrapy.Spider):
             item["mock_copiers"] = mock
         return item
 
-    def _build_performance_items(self, app_data: Dict[str, Any]) -> Iterable[CopyTradePerformanceItem]:
+    def _build_performance_items(
+        self, app_data: Dict[str, Any]
+    ) -> Iterable[CopyTradePerformanceItem]:
         results: Dict[int, Dict[str, Any]] = {}
         for candidate in self._iter_objects(app_data):
             if not isinstance(candidate, dict):
@@ -340,7 +409,7 @@ class CopyTradeSpider(scrapy.Spider):
             if days is None:
                 continue
             roi = self._parse_number(
-                self._pick(candidate, ["roi", "roiValue", "roiPercentage"])
+                self._pick(candidate, ["roi", "roiValue", "roiPercentage", "ROI"])
             )
             pnl = self._parse_number(
                 self._pick(candidate, ["pnl", "pnlValue", "copyPnl", "profit"])
@@ -400,16 +469,16 @@ class CopyTradeSpider(scrapy.Spider):
     def _build_follower_item(self, record: Dict[str, Any]) -> Optional[CopyTradeFollowerItem]:
         user_id = self._pick(
             record,
-            ["copyTraderId", "copyUid", "copyId", "uid", "userId"],
+            ["copyTraderId", "copyUid", "copyId", "uid", "userId", "user_id"],
         )
         amount = self._parse_number(
             self._pick(record, ["copyAmount", "amount", "investment", "followAmount"])
         )
         total_pnl = self._parse_number(
-            self._pick(record, ["totalPnl", "copyTotalPnl", "pnl", "copyPnl"])
+            self._pick(record, ["totalPnl", "copyTotalPnl", "pnl", "copyPnl", "total_pnl"])
         )
         total_roi = self._parse_number(
-            self._pick(record, ["totalRoi", "copyTotalRoi", "roi", "copyRoi"])
+            self._pick(record, ["totalRoi", "copyTotalRoi", "roi", "copyRoi", "total_roi"])
         )
         duration = self._parse_int(
             self._pick(record, ["duration", "followDuration", "copyDuration"])
@@ -429,30 +498,20 @@ class CopyTradeSpider(scrapy.Spider):
         item["total_pnl"] = total_pnl
         item["total_roi"] = total_roi
         item["duration"] = duration
-        item["created_date"] = self.scraped_date
+        item["created_date"] = record.get("created_date", self.scraped_date)
         return item
 
-    async def _extract_app_data(self, page) -> Optional[Dict[str, Any]]:
-        html = await page.content()
-        selector = Selector(text=html)
-        for script_selector in APP_DATA_SELECTORS:
-            for script in selector.css(script_selector).getall():
-                script = (script or "").strip()
-                if not script:
-                    continue
-                try:
-                    data = json.loads(script)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(data, dict):
-                    return data
-        match = JSON_FALLBACK_PATTERN.search(html)
-        if match:
-            try:
-                return json.loads(match.group(1))
-            except json.JSONDecodeError:
-                return None
-        return None
+    def _validate_overview(self, item: CopyTradeOverviewItem) -> None:
+        for field in ("copiers", "aum_usdt", "leading_balance_usdt"):
+            value = item.get(field)
+            if value in (None, 0):
+                raise CloseSpider(f"Overview field {field} is empty")
+
+    def _validate_performance(self, item: CopyTradePerformanceItem) -> None:
+        for field in ("roi", "pnl_usdt"):
+            value = item.get(field)
+            if value in (None, 0):
+                raise CloseSpider(f"Performance field {field} is empty")
 
     def _iter_objects(self, data: Any) -> Iterable[Any]:
         stack = [data]
@@ -510,16 +569,6 @@ class CopyTradeSpider(scrapy.Spider):
             return int(number)
         except (TypeError, ValueError):
             return None
-
-    def _extract_page_number(self, payload: Dict[str, Any]) -> Optional[int]:
-        return self._parse_int(
-            self._find_first(payload, ["page", "pageNo", "pageIndex", "currentPage"])
-        )
-
-    def _extract_total_pages(self, payload: Dict[str, Any]) -> Optional[int]:
-        return self._parse_int(
-            self._find_first(payload, ["totalPage", "pageCount", "totalPages", "pages"])
-        )
 
     def _normalise_days(self, value: Any) -> Optional[int]:
         if value is None:
