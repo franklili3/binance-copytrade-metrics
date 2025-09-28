@@ -2233,14 +2233,14 @@ class BinanceCopyTradeScraper:
                 time.sleep(0.3)
             except Exception:
                 pass
+
             try:
                 max_pages = 8  # 下调上限，降低超时风险
                 pages_collected = 1
                 for _ in range(max_pages - 1):
-                    # 先尝试数字分页：定位分页条，点击当前页的下一个数字页
                     page_clicked = False
+                    numbered = []
                     try:
-                        # 常见分页容器
                         pager_xpaths = [
                             "//ul[contains(@class,'pagination')]",
                             "//*[@role='navigation' and .//*[contains(@class,'page')]]",
@@ -2255,13 +2255,10 @@ class BinanceCopyTradeScraper:
                                 pager = elems[0]
                                 break
                         if pager is not None:
-                            # 查找所有可点击的页码按钮/链接
-                            page_nodes = pager.find_elements(By.XPATH, 
-                                ".//button | .//a | .//*[self::li or self::div]//*[self::a or self::button] | .//*[@role='button']"
+                            page_nodes = pager.find_elements(
+                                By.XPATH,
+                                ".//button | .//a | .//*[self::li or self::div]//*[self::a or self::button] | .//*[@role='button']",
                             )
-                            # 提取数字与激活状态
-                            current_index = None
-                            numbered = []
                             for el in page_nodes:
                                 try:
                                     txt = (el.text or '').strip()
@@ -2269,77 +2266,62 @@ class BinanceCopyTradeScraper:
                                         continue
                                     if re.fullmatch(r"\d+", txt):
                                         num = int(txt)
-                                        # 判断是否为当前页
                                         cls = (el.get_attribute('class') or '')
                                         aria_cur = el.get_attribute('aria-current') or ''
                                         is_active = ('active' in cls.lower()) or (aria_cur == 'page')
                                         numbered.append((num, el, is_active))
                                 except Exception:
                                     continue
-                        if numbered:
-                            numbered.sort(key=lambda x: x[0])
-                            # 确定当前页数字，取其后的最小一个作为下一页
-                            active_nums = [n for n, _, a in numbered if a]
-                            if active_nums:
-                                cur = max(active_nums)
-                            else:
-                                # 若未识别激活页，假设最小数字为当前之前
-                                cur = min(n for n, _, _ in numbered)
-                            next_candidates = [(n, e) for n, e, _ in numbered if n > cur]
-                            if next_candidates:
-                                nnum, nel = next_candidates[0]
+                    except Exception as pagination_err:
+                        logger.debug(f"定位分页数字失败: {pagination_err}")
+    
+                    if numbered:
+                        numbered.sort(key=lambda x: x[0])
+                        active_nums = [n for n, _, a in numbered if a]
+                        if active_nums:
+                            cur = max(active_nums)
+                        else:
+                            cur = min(n for n, _, _ in numbered)
+                        next_candidates = [(n, e) for n, e, _ in numbered if n > cur]
+                        if next_candidates:
+                            nnum, nel = next_candidates[0]
+                            try:
+                                self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nel)
+                                time.sleep(0.15)
                                 try:
-                                    self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nel)
-                                    time.sleep(0.15)
-                                    try:
-                                        nel.click()
-                                    except Exception:
-                                        self.driver.execute_script("arguments[0].click();", nel)
-                                    page_clicked = True
-                                    logger.info(f"数字分页：点击第 {nnum} 页")
-                                except Exception as ce:
-                                    logger.debug(f"点击数字页失败: {ce}")
-            
-            # 若通过数字页点击，等待内容变化
-            if page_clicked:
-                old_html_len = len(html_content) if 'html_content' in locals() else 0
-                try:
-                    WebDriverWait(self.driver, 8).until(lambda d: len(d.page_source) != old_html_len)
-                except Exception:
-                    time.sleep(1.2)
-        except Exception:
-            pass
-
-        # 查找对应的try块
-        try:
-            if not page_clicked:
-                # 回退：定位"下一页/更多"按钮
-                next_btn_xpaths = [
-                    "//button[normalize-space()='Next' and not(@disabled)]",
-                    "//button[contains(., 'Next') and not(@disabled)]",
-                    "//li[contains(@class,'next')]//button[not(@disabled)]",
-                    "//a[@rel='next' and not(contains(@aria-disabled,'true'))]",
-                    "//button[contains(., '下一页') and not(@disabled)]",
-                    "//button[normalize-space()='Load more' or normalize-space()='Load More' or contains(.,'加载更多')]",
-                    "//*[@role='button' and (contains(.,'Next') or contains(.,'下一页') or contains(.,'Load more') or contains(.,'加载更多')) and not(@aria-disabled='true')]",
-                    "//*[@aria-label='Next page' or @aria-label='next page' or @aria-label='下一页']",
-                    "//*[@data-testid='pagination-next' or contains(@data-testid,'next')]",
-                    "//li[contains(@class,'next')]//a[not(contains(@aria-disabled,'true'))]",
-                    "//button[normalize-space()='›' or normalize-space()='»']",
-                    "//a[normalize-space()='›' or normalize-space()='»']",
-                ]
-                next_btn = None
-                for xp in next_btn_xpaths:
-                    elems = self.driver.find_elements(By.XPATH, xp)
-                    if elems:
-                        next_btn = elems[0]
-                        break
-            if not next_btn:
-                        # 识别SVG右箭头图标的父级可点击元素（button/a/role=button）
+                                    nel.click()
+                                except Exception:
+                                    self.driver.execute_script("arguments[0].click();", nel)
+                                page_clicked = True
+                                logger.info(f"数字分页：点击第 {nnum} 页")
+                            except Exception as ce:
+                                logger.debug(f"点击数字页失败: {ce}")
+    
+                    next_btn = None
+                    if not page_clicked:
                         try:
-                            svg_icon_xp = "//path[contains(@d, 'M12.288 12l-3.89 3.89 1.768 1.767L15.823 12l-1.768-1.768-3.889-3.889-1.768 1.768 3.89 3.89z')]"
-                            icons = self.driver.find_elements(By.XPATH, svg_icon_xp)
-                            if icons:
+                            next_btn_xpaths = [
+                                "//button[normalize-space()='Next' and not(@disabled)]",
+                                "//button[contains(., 'Next') and not(@disabled)]",
+                                "//li[contains(@class,'next')]//button[not(@disabled)]",
+                                "//a[@rel='next' and not(contains(@aria-disabled,'true'))]",
+                                "//button[contains(., '下一页') and not(@disabled)]",
+                                "//button[normalize-space()='Load more' or normalize-space()='Load More' or contains(.,'加载更多')]",
+                                "//*[@role='button' and (contains(.,'Next') or contains(.,'下一页') or contains(.,'Load more') or contains(,'加载更多')) and not(@aria-disabled='true')]",
+                                "//*[@aria-label='Next page' or @aria-label='next page' or @aria-label='下一页']",
+                                "//*[@data-testid='pagination-next' or contains(@data-testid,'next')]",
+                                "//li[contains(@class,'next')]//a[not(contains(@aria-disabled,'true'))]",
+                                "//button[normalize-space()='›' or normalize-space()='»']",
+                                "//a[normalize-space()='›' or normalize-space()='»']",
+                            ]
+                            for xp in next_btn_xpaths:
+                                elems = self.driver.find_elements(By.XPATH, xp)
+                                if elems:
+                                    next_btn = elems[0]
+                                    break
+                            if not next_btn:
+                                svg_icon_xp = "//path[contains(@d, 'M12.288 12l-3.89 3.89 1.768 1.767L15.823 12l-1.768-1.768-3.889-3.889-1.768 1.768 3.89 3.89z')]"
+                                icons = self.driver.find_elements(By.XPATH, svg_icon_xp)
                                 for ico in icons:
                                     try:
                                         cand = ico.find_element(By.XPATH, "ancestor::*[self::button or self::a or @role='button'][1]")
@@ -2349,82 +2331,14 @@ class BinanceCopyTradeScraper:
                                             break
                                     except Exception:
                                         continue
-                        except Exception:
-                            pass
-                except Exception:
-                    time.sleep(1.2)
-        except Exception:
-            pass
-        
-        # 删除重复的代码片段
-        # 下面的代码片段是重复的，应该被删除
-        if not page_clicked:
-                # 回退：定位"下一页/更多"按钮
-                next_btn_xpaths = [
-                    "//button[normalize-space()='Next' and not(@disabled)]",
-                    "//button[contains(., 'Next') and not(@disabled)]",
-                    "//li[contains(@class,'next')]//button[not(@disabled)]",
-                    "//a[@rel='next' and not(contains(@aria-disabled,'true'))]",
-                    "//button[contains(., '下一页') and not(@disabled)]",
-                    "//button[normalize-space()='Load more' or normalize-space()='Load More' or contains(.,'加载更多')]",
-                    "//*[@role='button' and (contains(.,'Next') or contains(.,'下一页') or contains(.,'Load more') or contains(.,'加载更多')) and not(@aria-disabled='true')]",
-                    "//*[@aria-label='Next page' or @aria-label='next page' or @aria-label='下一页']",
-                    "//*[@data-testid='pagination-next' or contains(@data-testid,'next')]",
-                    "//li[contains(@class,'next')]//a[not(contains(@aria-disabled,'true'))]",
-                    "//button[normalize-space()='›' or normalize-space()='»']",
-                    "//a[normalize-space()='›' or normalize-space()='»']",
-                ]
-                next_btn = None
-                for xp in next_btn_xpaths:
-                    elems = self.driver.find_elements(By.XPATH, xp)
-                    if elems:
-                        next_btn = elems[0]
-                        break
-                if not next_btn:
-                    # 识别SVG右箭头图标的父级可点击元素（button/a/role=button）
-                    try:
-                        svg_icon_xp = "//path[contains(@d, 'M12.288 12l-3.89 3.89 1.768 1.767L15.823 12l-1.768-1.768-3.889-3.889-1.768 1.768 3.89 3.89z')]"
-                        icons = self.driver.find_elements(By.XPATH, svg_icon_xp)
-                        if icons:
-                            for ico in icons:
-                                try:
-                                    cand = ico.find_element(By.XPATH, "ancestor::*[self::button or self::a or @role='button'][1]")
-                                    if cand:
-                                        next_btn = cand
-                                        logger.info("通过SVG右箭头定位到下一页按钮")
-                                        break
-                                except Exception:
-                                    continue
-                    except Exception:
-                        pass
-
-                                    except Exception:
-                                        continue
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-                
-                if not page_clicked:
-                    # 回退：定位"下一页/更多"按钮
-                    try:
-                        next_btn = self.driver.find_element(By.XPATH, '//button[contains(text(), "下一页")]')
-                        next_btn.click()
-                        time.sleep(2)
-                    except Exception:
+                        except Exception as next_btn_err:
+                            logger.debug(f"定位下一页按钮失败: {next_btn_err}")
+    
+                    if not page_clicked and not next_btn:
                         try:
-                            next_btn = self.driver.find_element(By.XPATH, '//button[contains(text(), "更多")]')
-                            next_btn.click()
-                            time.sleep(2)
-                        except Exception:
-                            pass
-                    if not next_btn:
-                        # 进一步回退：尝试虚拟滚动容器下拉加载
-                        try:
-                            # 识别可能的滚动容器
                             scroll_candidates = self.driver.find_elements(
                                 By.XPATH,
-                                "//*[contains(@class,'virtual') or contains(@class,'scroll') or contains(@class,'Scrollable') or contains(@class,'bn-table') or contains(@class,'table')][.//table or .//*[@role='row'] or .//tr]"
+                                "//*[contains(@class,'virtual') or contains(@class,'scroll') or contains(@class,'Scrollable') or contains(@class,'bn-table') or contains(@class,'table')][.//table or .//*[@role='row'] or .//tr]",
                             )
                             scrolled = False
                             for sc in scroll_candidates[:3]:
@@ -2435,15 +2349,16 @@ class BinanceCopyTradeScraper:
                                 except Exception:
                                     continue
                             if not scrolled:
-                                # 如果没有明确的容器，整体窗口滚动一次
                                 self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                                 time.sleep(0.6)
                         except Exception:
-                            # 最后兜底：尝试通过窗口滚动加载更多
-                            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                            time.sleep(0.6)
-                    if next_btn:
-                        # 点击翻页
+                            try:
+                                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                                time.sleep(0.6)
+                            except Exception:
+                                pass
+    
+                    if not page_clicked and next_btn:
                         try:
                             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", next_btn)
                             time.sleep(0.2)
@@ -2451,185 +2366,182 @@ class BinanceCopyTradeScraper:
                                 next_btn.click()
                             except Exception:
                                 self.driver.execute_script("arguments[0].click();", next_btn)
+                            page_clicked = True
                         except Exception as ce:
                             logger.debug(f"点击下一页失败: {ce}")
-                            break
-                        # 等待页面内容变化
-                        old_html_len = len(html_content) if 'html_content' in locals() else 0
-                        try:
-                            WebDriverWait(self.driver, 8).until(lambda d: len(d.page_source) != old_html_len)
-                        except Exception:
-                            time.sleep(0.8)
-                # 重新解析：获取当前页源并进行回退解析（优先真实UID）
-                html_content = self.driver.page_source
-                try:
-                    dom = etree.HTML(html_content)
-                except Exception:
-                    dom = None
-                # 在包含列头关键词的容器内查找行
-                container_nodes = []
-                try:
-                    if dom is not None:
-                        container_nodes = dom.xpath("//*[.//text()[contains(.,'User ID')]][.//text()[contains(.,'Amount')]][.//text()[contains(.,'Total ROI')]]")
-                except Exception:
-                    container_nodes = []
-                scope = container_nodes[0] if container_nodes else (dom if dom is not None else None)
-                row_nodes = []
-                if scope is not None:
-                    row_nodes = scope.xpath(
-                        ".//table//tbody/tr | .//table//tr[td] | "
-                        ".//*[@role='rowgroup']/*[@role='row'] | .//*[@role='row' and not(ancestor::*[@aria-hidden='true'])] | "
-                        ".//div[contains(@class,'table-row') or contains(@class,'bn-table-row') or contains(@class,'row')][.//text()]"
-                    )
-                page_added = 0
-                for node in row_nodes:
+                            page_clicked = False
+    
+                    if not page_clicked:
+                        break
+    
+                    old_html_len = len(html_content) if 'html_content' in locals() else 0
                     try:
-                        text = " ".join("".join(t for t in node.itertext()).split())
-                        if not text or len(text) < 10:
-                            continue
-                        # 跳过表头行
-                        if any(h in text for h in ["User ID", "Amount", "Total PNL", "Total ROI", "Duration"]):
-                            continue
-                        # 用户名（可见字符串）
-                        user_id = None
-                        # 优先从第一列单元格
-                        cell_user = node.xpath(".//td[1]//text() | .//*[@role='cell'][1]//text() | ./div[1]//text()")
-                        if cell_user:
-                            user_id = "".join(cell_user).strip()
-                        if not user_id:
-                            # 链接文本兜底
-                            uid_candidates = node.xpath(".//a[contains(@href,'lead-details')]/text()")
-                            if uid_candidates:
-                                user_id = (uid_candidates[0] or '').strip()
-                        # 数值解析
-                        # 严格按列定位，避免把 PNL 当作 Amount
-                        amount_text = ''.join(node.xpath("string(.//td[2]) | string(.//*[@role='cell'][2]) | string(./div[2])")) or ''
-                        amount = _parse_amount_usdt(amount_text)
-                        # PNL列可能带+/-
-                        pnl_match_scope = ''.join(node.xpath("string(.//td[3]) | string(.//*[@role='cell'][3]) | string(./div[3])")) or text
-                        total_pnl = _parse_pnl_usdt(pnl_match_scope)
-                        roi_match_scope = ''.join(node.xpath("string(.//td[4]) | string(.//*[@role='cell'][4]) | string(./div[4])")) or text
-                        total_roi = _parse_roi_percent(roi_match_scope)
-                        dur_scope = ''.join(node.xpath("string(.//td[5]) | string(.//*[@role='cell'][5]) | string(./div[5])")) or text
-                        duration = _parse_duration_days(dur_scope)
-                        if user_id:
-                            # 避免页面内重复
-                            if any(r.get('user_id') == str(user_id) for r in records):
+                        WebDriverWait(self.driver, 8).until(lambda d: len(d.page_source) != old_html_len)
+                    except Exception:
+                        time.sleep(1.2)
+    
+                    html_content = self.driver.page_source
+                    try:
+                        dom = etree.HTML(html_content)
+                    except Exception:
+                        dom = None
+    
+                    container_nodes = []
+                    try:
+                        if dom is not None:
+                            container_nodes = dom.xpath("//*[.//text()[contains(.,'User ID')]][.//text()[contains(.,'Amount')]][.//text()[contains(.,'Total ROI')]]")
+                    except Exception:
+                        container_nodes = []
+    
+                    scope = container_nodes[0] if container_nodes else (dom if dom is not None else None)
+                    row_nodes = []
+                    if scope is not None:
+                        row_nodes = scope.xpath(
+                            ".//table//tbody/tr | .//table//tr[td] | "
+                            ".//*[@role='rowgroup']/*[@role='row'] | .//*[@role='row' and not(ancestor::*[@aria-hidden='true'])] | "
+                            ".//div[contains(@class,'table-row') or contains(@class,'bn-table-row') or contains(@class,'row')][.//text()]",
+                        )
+    
+                    page_added = 0
+                    for node in row_nodes:
+                        try:
+                            text = " ".join("".join(t for t in node.itertext()).split())
+                            if not text or len(text) < 10:
                                 continue
+                            if any(h in text for h in ["User ID", "Amount", "Total PNL", "Total ROI", "Duration"]):
+                                continue
+                            user_id = None
+                            cell_user = node.xpath(".//td[1]//text() | .//*[@role='cell'][1]//text() | ./div[1]//text()")
+                            if cell_user:
+                                user_id = "".join(cell_user).strip()
+                            if not user_id:
+                                uid_candidates = node.xpath(".//a[contains(@href,'lead-details')]/text()")
+                                if uid_candidates:
+                                    user_id = (uid_candidates[0] or '').strip()
+                            amount_text = ''.join(node.xpath("string(.//td[2]) | string(.//*[@role='cell'][2]) | string(./div[2])")) or ''
+                            amount = _parse_amount_usdt(amount_text)
+                            pnl_match_scope = ''.join(node.xpath("string(.//td[3]) | string(.//*[@role='cell'][3]) | string(./div[3])")) or text
+                            total_pnl = _parse_pnl_usdt(pnl_match_scope)
+                            roi_match_scope = ''.join(node.xpath("string(.//td[4]) | string(.//*[@role='cell'][4]) | string(./div[4])")) or text
+                            total_roi = _parse_roi_percent(roi_match_scope)
+                            dur_scope = ''.join(node.xpath("string(.//td[5]) | string(.//*[@role='cell'][5]) | string(./div[5])")) or text
+                            duration = _parse_duration_days(dur_scope)
+                            if user_id:
+                                if any(r.get('user_id') == str(user_id) for r in records):
+                                    continue
+                                records.append({
+                                    'duration': int(duration) if duration is not None else 0,
+                                    'user_id': str(user_id),
+                                    'amount': amount,
+                                    'total_pnl': total_pnl,
+                                    'total_roi': total_roi,
+                                    'created_date': date.today().isoformat(),
+                                })
+                                page_added += 1
+                        except Exception:
+                            continue
+    
+                    pages_collected += 1
+                    logger.info(f"翻页解析完成：已收集 {pages_collected} 页，本页新增记录 {page_added} 条")
+                    if page_added == 0:
+                        break
+            except Exception as e:
+                logger.debug(f"翻页流程出错: {e}")
+            # 2.2 进一步：基于 lead-details 链接的UID提取（很多卡片/行会包含跳转链接）
+            if not records and dom is not None:
+                try:
+                    # 获取当前 lead_trader_id，避免将自身 UID 计入列表
+                    current_uid = None
+                    try:
+                        cur_url = self.driver.current_url
+                        mcu = re.search(r"lead-details/(\d+)", cur_url)
+                        if mcu:
+                            current_uid = mcu.group(1)
+                    except Exception:
+                        pass
+                    anchor_nodes = dom.xpath("//a[contains(@href,'/copy-trading/lead-details')]/@href")
+                    logger.info(f"页面内包含 lead-details 链接数量: {len(anchor_nodes)}")
+                    uid_set = set()
+                    for href in anchor_nodes:
+                        m = re.search(r"lead-details/(\d+)", href)
+                        if m:
+                            uid = m.group(1)
+                            if current_uid and uid == current_uid:
+                                continue
+                            uid_set.add(uid)
+                    logger.info(f"基于链接提取到不同 UID 数量: {len(uid_set)}")
+                    # 为这些 UID 构造基本记录
+                    for uid in list(uid_set)[:50]:  # 限制数量避免过多
+                        if not any(r.get('user_id') == str(uid) for r in records):
                             records.append({
-                                'duration': int(duration) if duration is not None else 0,
-                                'user_id': str(user_id),
-                                'amount': amount,
-                                'total_pnl': total_pnl,
-                                'total_roi': total_roi,
+                                'user_id': str(uid),
+                                'amount': 0.0,
+                                'total_pnl': 0.0,
+                                'total_roi': 0.0,
+                                'duration': 0,
                                 'created_date': date.today().isoformat(),
                             })
-                            page_added += 1
-                    except Exception:
-                        continue
-                pages_collected += 1
-                logger.info(f"翻页解析完成：已收集 {pages_collected} 页，本页新增记录 {page_added} 条")
-                if page_added == 0:
-                    # 没有新增，可能到底了
-                    break
-        except Exception as e:
-            logger.debug(f"翻页流程出错: {e}")
-
-        # 2.2 进一步：基于 lead-details 链接的UID提取（很多卡片/行会包含跳转链接）
-        if not records and dom is not None:
-            try:
-                # 获取当前 lead_trader_id，避免将自身 UID 计入列表
-                current_uid = None
+                except Exception as e:
+                    logger.debug(f"基于链接提取 UID 失败: {e}")
+    
+            # 3) 若DOM提取为空，尝试从页面源代码中的JSON片段提取
+            if not records:
                 try:
-                    cur_url = self.driver.current_url
-                    mcu = re.search(r"lead-details/(\d+)", cur_url)
-                    if mcu:
-                        current_uid = mcu.group(1)
-                except Exception:
-                    pass
-                anchor_nodes = dom.xpath("//a[contains(@href,'/copy-trading/lead-details')]/@href")
-                logger.info(f"页面内包含 lead-details 链接数量: {len(anchor_nodes)}")
-                uid_set = set()
-                for href in anchor_nodes:
-                    m = re.search(r"lead-details/(\d+)", href)
-                    if m:
-                        uid = m.group(1)
-                        if current_uid and uid == current_uid:
-                            continue
-                        uid_set.add(uid)
-                logger.info(f"基于链接提取到不同 UID 数量: {len(uid_set)}")
-                # 为这些 UID 构造基本记录
-                for uid in list(uid_set)[:50]:  # 限制数量避免过多
-                    if not any(r.get('user_id') == str(uid) for r in records):
-                        records.append({
-                            'user_id': str(uid),
-                            'amount': 0.0,
-                            'total_pnl': 0.0,
-                            'total_roi': 0.0,
-                            'duration': 0,
-                            'created_date': date.today().isoformat(),
-                        })
-            except Exception as e:
-                logger.debug(f"基于链接提取 UID 失败: {e}")
-
-        # 3) 若DOM提取为空，尝试从页面源代码中的JSON片段提取
+                    # 常见 JSON 结构兜底（字段名可能含有 uid/amount/roi/pnl/duration 等）
+                    patterns = [
+                        r'"copyTraderList"\s*:\s*\[(\{.*?\})\]\s*,?',
+                        r'\[\{\s*"uid".*?\}\]'
+                    ]
+                    for pat in patterns:
+                        m = re.search(pat, html_content, flags=re.I | re.S)
+                        if m:
+                            json_text = m.group(0)
+                            # 尝试提取对象数组
+                            arr_m = re.search(r"\[\s*\{.*?\}\s*\]", json_text, flags=re.S)
+                            if arr_m:
+                                arr_text = arr_m.group(0)
+                                try:
+                                    data_list = json.loads(arr_text)
+                                    for obj in data_list:
+                                        user_id = str(obj.get('uid') or obj.get('userId') or obj.get('user_id') or '')
+                                        if not user_id:
+                                            continue
+                                        duration = obj.get('duration') or obj.get('days')
+                                        amount = obj.get('amount') or obj.get('copyAmount')
+                                        total_pnl = obj.get('pnl') or obj.get('totalPnl')
+                                        total_roi = obj.get('roi') or obj.get('totalRoi') or obj.get('returnRate')
+                                        records.append({
+                                            'user_id': user_id,
+                                            'amount': float(amount) if amount is not None else 0.0,
+                                            'total_pnl': float(total_pnl) if total_pnl is not None else 0.0,
+                                            'total_roi': float(total_roi) if total_roi is not None else 0.0,
+                                            'duration': int(duration) if duration is not None else 0,
+                                            'created_date': date.today().isoformat(),
+                                        })
+                                except Exception as je:
+                                    logger.debug(f"JSON解析失败: {je}")
+                except Exception as e:
+                    logger.debug(f"JSON兜底提取失败: {e}")
+    
+        except Exception as e:
+            logger.error(f"DOM解析出错: {e}")
+    
+        logger.info(f"Copy Traders 列表提取记录数: {len(records)}")
+        
+        # 如果没有提取到数据，创建测试数据以确保上传流程正常工作
         if not records:
-            try:
-                # 常见 JSON 结构兜底（字段名可能含有 uid/amount/roi/pnl/duration 等）
-                patterns = [
-                    r'"copyTraderList"\s*:\s*\[(\{.*?\})\]\s*,?',
-                    r'\[\{\s*"uid".*?\}\]'
-                ]
-                for pat in patterns:
-                    m = re.search(pat, html_content, flags=re.I | re.S)
-                    if m:
-                        json_text = m.group(0)
-                        # 尝试提取对象数组
-                        arr_m = re.search(r"\[\s*\{.*?\}\s*\]", json_text, flags=re.S)
-                        if arr_m:
-                            arr_text = arr_m.group(0)
-                            try:
-                                data_list = json.loads(arr_text)
-                                for obj in data_list:
-                                    user_id = str(obj.get('uid') or obj.get('userId') or obj.get('user_id') or '')
-                                    if not user_id:
-                                        continue
-                                    duration = obj.get('duration') or obj.get('days')
-                                    amount = obj.get('amount') or obj.get('copyAmount')
-                                    total_pnl = obj.get('pnl') or obj.get('totalPnl')
-                                    total_roi = obj.get('roi') or obj.get('totalRoi') or obj.get('returnRate')
-                                    records.append({
-                                        'user_id': user_id,
-                                        'amount': float(amount) if amount is not None else 0.0,
-                                        'total_pnl': float(total_pnl) if total_pnl is not None else 0.0,
-                                        'total_roi': float(total_roi) if total_roi is not None else 0.0,
-                                        'duration': int(duration) if duration is not None else 0,
-                                        'created_date': date.today().isoformat(),
-                                    })
-                            except Exception as je:
-                                logger.debug(f"JSON解析失败: {je}")
-            except Exception as e:
-                logger.debug(f"JSON兜底提取失败: {e}")
-
-    except Exception as e:
-        logger.error(f"DOM解析出错: {e}")
-
-    logger.info(f"Copy Traders 列表提取记录数: {len(records)}")
-    
-    # 如果没有提取到数据，创建测试数据以确保上传流程正常工作
-    if not records:
-        logger.warning("未提取到任何Copy Traders数据，创建测试数据以验证上传流程")
-        test_record = {
-            'user_id': f'test_user_{int(time.time())}',
-            'amount': 1000.0,
-            'total_pnl': 100.0,
-            'total_roi': 10.0,
-            'duration': 30,
-            'created_date': date.today().isoformat()
-        }
-        records.append(test_record)
-    
-    return records
+            logger.warning("未提取到任何Copy Traders数据，创建测试数据以验证上传流程")
+            test_record = {
+                'user_id': f'test_user_{int(time.time())}',
+                'amount': 1000.0,
+                'total_pnl': 100.0,
+                'total_roi': 10.0,
+                'duration': 30,
+                'created_date': date.today().isoformat()
+            }
+            records.append(test_record)
+        
+        return records
 
     def upload_copy_traders_to_supabase(self, records: List[Dict[str, Any]]):
         """Upload records to Supabase table public.binance_spot_copy_traders via upsert.
@@ -2696,10 +2608,6 @@ import shutil
 from lxml import etree
 
 # Import the scraper classes
-from bitcoin_etf_scraper import BitcoinETFScraper, setup_shared_driver
-from binance_copy_trade_scraper import BinanceCopyTradeScraper
-from serverless_bitcoin_etf_scraper import BitcoinETFScraper as ServerlessBitcoinETFScraper
-from serverless_binance_scraper import BinanceCopyTradeScraper as ServerlessBinanceCopyTradeScraper
 
 # In serverless environments, use /tmp for writable storage
 # 但在阿里云函数计算平台，我们也需要支持项目目录下的chromedriver

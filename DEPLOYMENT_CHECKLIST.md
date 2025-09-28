@@ -30,11 +30,7 @@ This checklist ensures you have everything needed to deploy and run the Bitcoin 
 
 ### Step 1: Download and Setup Project
 ```bash
-# Create project directory
-mkdir bitcoin-etf-scraper
-cd bitcoin-etf-scraper
 
-# Copy all files from ./final/ directory to your project folder
 # Ensure you have:
 # - serverless.py (main scraper)
 # - config.py (configuration file)
