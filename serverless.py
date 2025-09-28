@@ -2198,81 +2198,212 @@ class BinanceCopyTradeScraper:
                     return int(m.group(1))
                 return None
 
-            # 在包含列头关键词的容器内查找行
-            container_nodes = []
-            try:
-                if dom is not None:
-                    container_nodes = dom.xpath("//*[.//text()[contains(.,'User ID')]][.//text()[contains(.,'Amount')]][.//text()[contains(.,'Total ROI')]]")
-            except Exception:
-                container_nodes = []
-            scope = container_nodes[0] if container_nodes else (dom if dom is not None else None)
-            row_nodes = []
-            if scope is not None:
-                row_nodes = scope.xpath(
-                    ".//table//tbody/tr | .//table//tr[td] | "
-                    ".//*[@role='rowgroup']/*[@role='row'] | .//*[@role='row' and not(ancestor::*[@aria-hidden='true'])] | "
-                    ".//div[contains(@class,'table-row') or contains(@class,'bn-table-row') or contains(@class,'row')][.//text()]"
-                )
-            logger.info(f"回退模式：在DOM中发现潜在列表行数量: {len(row_nodes)}")
-            for node in row_nodes:
+            def _collect_scrollable_containers() -> List[Any]:
                 try:
-                    text = " ".join("".join(t for t in node.itertext()).split())
-                    if not text or len(text) < 10:
-                        continue
-                    # 跳过表头行
-                    if any(h in text for h in ["User ID", "Amount", "Total PNL", "Total ROI", "Duration"]):
-                        continue
-                    # 用户名（可见字符串）
-                    user_id = None
-                    # 优先从第一列单元格
-                    cell_user = node.xpath(".//td[1]//text() | .//*[@role='cell'][1]//text() | ./div[1]//text()")
-                    if cell_user:
-                        user_id = "".join(cell_user).strip()
-                    if not user_id:
-                        # 链接文本兜底
-                        uid_candidates = node.xpath(".//a[contains(@href,'lead-details')]/text()")
-                        if uid_candidates:
-                            user_id = (uid_candidates[0] or '').strip()
-                    # 数值解析
-                    # 严格按列定位，避免把 PNL 当作 Amount
-                    amount_text = ''.join(node.xpath("string(.//td[2]) | string(.//*[@role='cell'][2]) | string(./div[2])")) or ''
-                    amount = _parse_amount_usdt(amount_text)
-                    # PNL列可能带+/-
-                    pnl_match_scope = ''.join(node.xpath("string(.//td[3]) | string(.//*[@role='cell'][3]) | string(./div[3])")) or text
-                    total_pnl = _parse_pnl_usdt(pnl_match_scope)
-                    roi_match_scope = ''.join(node.xpath("string(.//td[4]) | string(.//*[@role='cell'][4]) | string(./div[4])")) or text
-                    total_roi = _parse_roi_percent(roi_match_scope)
-                    dur_scope = ''.join(node.xpath("string(.//td[5]) | string(.//*[@role='cell'][5]) | string(./div[5])")) or text
-                    duration = _parse_duration_days(dur_scope)
-                    if user_id:
-                        # 避免页面内重复
-                        if any(r.get('user_id') == str(user_id) for r in records):
+                    return self.driver.find_elements(
+                        By.XPATH,
+                        "//*[contains(@class,'virtual') or contains(@class,'scroll') or contains(@class,'Scrollable') or contains(@class,'bn-table') or contains(@class,'table')][.//table or .//*[@role='row'] or .//tr]",
+                    )
+                except Exception:
+                    return []
+
+            def _upsert_record(raw: Dict[str, Any]) -> bool:
+                uid = str(raw.get('user_id') or '').strip()
+                if not uid:
+                    return False
+
+                def _coerce_float(val: Any) -> Optional[float]:
+                    if val is None or val == "":
+                        return None
+                    try:
+                        return float(val)
+                    except (TypeError, ValueError):
+                        return None
+
+                try:
+                    duration_val = int(raw.get('duration') or 0)
+                except Exception:
+                    duration_val = 0
+
+                cleaned = {
+                    'user_id': uid,
+                    'duration': duration_val,
+                    'amount': _coerce_float(raw.get('amount')),
+                    'total_pnl': _coerce_float(raw.get('total_pnl')),
+                    'total_roi': _coerce_float(raw.get('total_roi')),
+                    'created_date': raw.get('created_date') or date.today().isoformat(),
+                }
+
+                existing_idx = next((idx for idx, item in enumerate(records) if item.get('user_id') == uid), None)
+                if existing_idx is not None:
+                    existing = records[existing_idx]
+                    updated = False
+                    merged = existing.copy()
+                    for key, value in cleaned.items():
+                        if key == 'user_id' or value is None:
                             continue
-                        records.append({
-                            'duration': int(duration) if duration is not None else 0,
-                            'user_id': str(user_id),
+                        if merged.get(key) != value:
+                            merged[key] = value
+                            updated = True
+                    if updated:
+                        records[existing_idx] = merged
+                    return updated
+
+                records.append(cleaned)
+                return True
+
+            def _extract_records_from_dom(dom_obj) -> int:
+                if dom_obj is None:
+                    return 0
+                try:
+                    container_nodes = dom_obj.xpath(
+                        "//*[.//text()[contains(.,'User ID')]][.//text()[contains(.,'Amount')]][.//text()[contains(.,'Total ROI')]]"
+                    )
+                except Exception:
+                    container_nodes = []
+
+                scope = container_nodes[0] if container_nodes else dom_obj
+                if scope is None:
+                    return 0
+
+                try:
+                    row_nodes = scope.xpath(
+                        ".//table//tbody/tr | .//table//tr[td] | "
+                        ".//*[@role='rowgroup']/*[@role='row'] | .//*[@role='row' and not(ancestor::*[@aria-hidden='true'])] | "
+                        ".//div[contains(@class,'table-row') or contains(@class,'bn-table-row') or contains(@class,'row')][.//text()]",
+                    )
+                except Exception:
+                    row_nodes = []
+
+                added_or_updated = 0
+                for node in row_nodes:
+                    try:
+                        text = " ".join("".join(t for t in node.itertext()).split())
+                        if not text or len(text) < 10:
+                            continue
+                        if any(h in text for h in ["User ID", "Amount", "Total PNL", "Total ROI", "Duration"]):
+                            continue
+
+                        user_id = None
+                        cell_user = node.xpath(".//td[1]//text() | .//*[@role='cell'][1]//text() | ./div[1]//text()")
+                        if cell_user:
+                            user_id = "".join(cell_user).strip()
+                        if not user_id:
+                            uid_candidates = node.xpath(".//a[contains(@href,'lead-details')]/@href | .//a[contains(@href,'lead-details')]/text()")
+                            for candidate in uid_candidates:
+                                if candidate and candidate.strip():
+                                    if candidate.isdigit():
+                                        user_id = candidate.strip()
+                                    else:
+                                        m = re.search(r"(\d+)", candidate)
+                                        if m:
+                                            user_id = m.group(1)
+                                    if user_id:
+                                        break
+                        if not user_id:
+                            data_uid = node.xpath(".//@data-uid | .//@data-user-id | .//@data-userid")
+                            for candidate in data_uid:
+                                if candidate:
+                                    user_id = str(candidate).strip()
+                                    if user_id:
+                                        break
+                        if not user_id:
+                            text_uid_match = re.search(r"UID\s*:?\s*(\d{6,})", text, flags=re.I)
+                            if text_uid_match:
+                                user_id = text_uid_match.group(1)
+
+                        amount_text = ''.join(
+                            node.xpath("string(.//td[2]) | string(.//*[@role='cell'][2]) | string(./div[2])")
+                        ) or ''
+                        amount = _parse_amount_usdt(amount_text)
+
+                        pnl_scope = ''.join(
+                            node.xpath("string(.//td[3]) | string(.//*[@role='cell'][3]) | string(./div[3])")
+                        ) or text
+                        total_pnl = _parse_pnl_usdt(pnl_scope)
+
+                        roi_scope = ''.join(
+                            node.xpath("string(.//td[4]) | string(.//*[@role='cell'][4]) | string(./div[4])")
+                        ) or text
+                        total_roi = _parse_roi_percent(roi_scope)
+
+                        duration_scope = ''.join(
+                            node.xpath("string(.//td[5]) | string(.//*[@role='cell'][5]) | string(./div[5])")
+                        ) or text
+                        duration = _parse_duration_days(duration_scope)
+
+                        record = {
+                            'user_id': user_id,
                             'amount': amount,
                             'total_pnl': total_pnl,
                             'total_roi': total_roi,
+                            'duration': duration if duration is not None else 0,
                             'created_date': date.today().isoformat(),
-                        })
+                        }
+
+                        if _upsert_record(record):
+                            added_or_updated += 1
+                    except Exception as parse_err:
+                        logger.debug(f"解析单行失败: {parse_err}")
+                        continue
+
+                if added_or_updated:
+                    logger.info(f"本次DOM解析新增/更新 {added_or_updated} 条记录")
+                return added_or_updated
+
+            # 初次解析
+            initial_added = _extract_records_from_dom(dom)
+            logger.info(f"初始DOM解析新增/更新记录数: {initial_added}")
+
+            # 针对虚拟滚动列表的追加解析
+            stable_rounds = 0
+            scroll_attempts = 0
+            max_scroll_attempts = 8
+            while scroll_attempts < max_scroll_attempts:
+                scroll_attempts += 1
+                previous_count = len(records)
+                scrolled = False
+                for container_el in _collect_scrollable_containers()[:3]:
+                    try:
+                        self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", container_el)
+                        scrolled = True
+                        break
+                    except Exception:
+                        continue
+                if not scrolled:
+                    try:
+                        self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                        scrolled = True
+                    except Exception:
+                        scrolled = False
+
+                if not scrolled:
+                    break
+
+                time.sleep(0.8)
+                html_content = self.driver.page_source
+                try:
+                    dom = etree.HTML(html_content)
                 except Exception:
-                    continue
+                    dom = None
 
-            # 2.1 翻页/加载更多：在已提取首屏记录的基础上，尝试逐页抓取
-            # 为确保分页条可见，预先滚动至底部一次
-            try:
-                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(0.3)
-            except Exception:
-                pass
+                added = _extract_records_from_dom(dom)
+                if len(records) == previous_count:
+                    stable_rounds += 1
+                else:
+                    stable_rounds = 0
 
+                if added == 0 and stable_rounds >= 2:
+                    logger.info("虚拟滚动多次后未发现新增记录，停止滚动尝试。")
+                    break
+
+            # 处理分页/加载更多按钮
             try:
-                max_pages = 8  # 下调上限，降低超时风险
+                max_pages = 8
                 pages_collected = 1
-                for _ in range(max_pages - 1):
+                while pages_collected < max_pages:
                     page_clicked = False
-                    numbered = []
+                    numbered: List[Any] = []
                     try:
                         pager_xpaths = [
                             "//ul[contains(@class,'pagination')]",
@@ -2307,29 +2438,26 @@ class BinanceCopyTradeScraper:
                                     continue
                     except Exception as pagination_err:
                         logger.debug(f"定位分页数字失败: {pagination_err}")
-    
+
                     if numbered:
                         numbered.sort(key=lambda x: x[0])
                         active_nums = [n for n, _, a in numbered if a]
-                        if active_nums:
-                            cur = max(active_nums)
-                        else:
-                            cur = min(n for n, _, _ in numbered)
-                        next_candidates = [(n, e) for n, e, _ in numbered if n > cur]
+                        current = max(active_nums) if active_nums else min(n for n, _, _ in numbered)
+                        next_candidates = [(n, e) for n, e, _ in numbered if n > current]
                         if next_candidates:
-                            nnum, nel = next_candidates[0]
+                            target_num, element = next_candidates[0]
                             try:
-                                self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", nel)
-                                time.sleep(0.15)
+                                self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
+                                time.sleep(0.2)
                                 try:
-                                    nel.click()
+                                    element.click()
                                 except Exception:
-                                    self.driver.execute_script("arguments[0].click();", nel)
+                                    self.driver.execute_script("arguments[0].click();", element)
                                 page_clicked = True
-                                logger.info(f"数字分页：点击第 {nnum} 页")
+                                logger.info(f"数字分页：点击第 {target_num} 页")
                             except Exception as ce:
                                 logger.debug(f"点击数字页失败: {ce}")
-    
+
                     next_btn = None
                     if not page_clicked:
                         try:
@@ -2357,41 +2485,34 @@ class BinanceCopyTradeScraper:
                                 icons = self.driver.find_elements(By.XPATH, svg_icon_xp)
                                 for ico in icons:
                                     try:
-                                        cand = ico.find_element(By.XPATH, "ancestor::*[self::button or self::a or @role='button'][1]")
-                                        if cand:
-                                            next_btn = cand
+                                        candidate = ico.find_element(By.XPATH, "ancestor::*[self::button or self::a or @role='button'][1]")
+                                        if candidate:
+                                            next_btn = candidate
                                             logger.info("通过SVG右箭头定位到下一页按钮")
                                             break
                                     except Exception:
                                         continue
                         except Exception as next_btn_err:
                             logger.debug(f"定位下一页按钮失败: {next_btn_err}")
-    
-                    if not page_clicked and not next_btn:
-                        try:
-                            scroll_candidates = self.driver.find_elements(
-                                By.XPATH,
-                                "//*[contains(@class,'virtual') or contains(@class,'scroll') or contains(@class,'Scrollable') or contains(@class,'bn-table') or contains(@class,'table')][.//table or .//*[@role='row'] or .//tr]",
-                            )
-                            scrolled = False
-                            for sc in scroll_candidates[:3]:
-                                try:
-                                    self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", sc)
-                                    scrolled = True
-                                    time.sleep(0.6)
-                                except Exception:
-                                    continue
-                            if not scrolled:
-                                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+
+                    if not page_clicked and next_btn is None:
+                        for container_el in _collect_scrollable_containers()[:3]:
+                            try:
+                                self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", container_el)
+                                page_clicked = True
                                 time.sleep(0.6)
-                        except Exception:
+                                break
+                            except Exception:
+                                continue
+                        if not page_clicked:
                             try:
                                 self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                                 time.sleep(0.6)
+                                page_clicked = True
                             except Exception:
-                                pass
-    
-                    if not page_clicked and next_btn:
+                                page_clicked = False
+
+                    if not page_clicked and next_btn is not None:
                         try:
                             self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", next_btn)
                             time.sleep(0.2)
@@ -2403,87 +2524,33 @@ class BinanceCopyTradeScraper:
                         except Exception as ce:
                             logger.debug(f"点击下一页失败: {ce}")
                             page_clicked = False
-    
+
                     if not page_clicked:
                         break
-    
+
                     old_html_len = len(html_content) if 'html_content' in locals() else 0
                     try:
                         WebDriverWait(self.driver, 8).until(lambda d: len(d.page_source) != old_html_len)
                     except Exception:
-                        time.sleep(1.2)
-    
+                        time.sleep(1.0)
+
                     html_content = self.driver.page_source
                     try:
                         dom = etree.HTML(html_content)
                     except Exception:
                         dom = None
-    
-                    container_nodes = []
-                    try:
-                        if dom is not None:
-                            container_nodes = dom.xpath("//*[.//text()[contains(.,'User ID')]][.//text()[contains(.,'Amount')]][.//text()[contains(.,'Total ROI')]]")
-                    except Exception:
-                        container_nodes = []
-    
-                    scope = container_nodes[0] if container_nodes else (dom if dom is not None else None)
-                    row_nodes = []
-                    if scope is not None:
-                        row_nodes = scope.xpath(
-                            ".//table//tbody/tr | .//table//tr[td] | "
-                            ".//*[@role='rowgroup']/*[@role='row'] | .//*[@role='row' and not(ancestor::*[@aria-hidden='true'])] | "
-                            ".//div[contains(@class,'table-row') or contains(@class,'bn-table-row') or contains(@class,'row')][.//text()]",
-                        )
-    
-                    page_added = 0
-                    for node in row_nodes:
-                        try:
-                            text = " ".join("".join(t for t in node.itertext()).split())
-                            if not text or len(text) < 10:
-                                continue
-                            if any(h in text for h in ["User ID", "Amount", "Total PNL", "Total ROI", "Duration"]):
-                                continue
-                            user_id = None
-                            cell_user = node.xpath(".//td[1]//text() | .//*[@role='cell'][1]//text() | ./div[1]//text()")
-                            if cell_user:
-                                user_id = "".join(cell_user).strip()
-                            if not user_id:
-                                uid_candidates = node.xpath(".//a[contains(@href,'lead-details')]/text()")
-                                if uid_candidates:
-                                    user_id = (uid_candidates[0] or '').strip()
-                            amount_text = ''.join(node.xpath("string(.//td[2]) | string(.//*[@role='cell'][2]) | string(./div[2])")) or ''
-                            amount = _parse_amount_usdt(amount_text)
-                            pnl_match_scope = ''.join(node.xpath("string(.//td[3]) | string(.//*[@role='cell'][3]) | string(./div[3])")) or text
-                            total_pnl = _parse_pnl_usdt(pnl_match_scope)
-                            roi_match_scope = ''.join(node.xpath("string(.//td[4]) | string(.//*[@role='cell'][4]) | string(./div[4])")) or text
-                            total_roi = _parse_roi_percent(roi_match_scope)
-                            dur_scope = ''.join(node.xpath("string(.//td[5]) | string(.//*[@role='cell'][5]) | string(./div[5])")) or text
-                            duration = _parse_duration_days(dur_scope)
-                            if user_id:
-                                if any(r.get('user_id') == str(user_id) for r in records):
-                                    continue
-                                records.append({
-                                    'duration': int(duration) if duration is not None else 0,
-                                    'user_id': str(user_id),
-                                    'amount': amount,
-                                    'total_pnl': total_pnl,
-                                    'total_roi': total_roi,
-                                    'created_date': date.today().isoformat(),
-                                })
-                                page_added += 1
-                        except Exception:
-                            continue
-    
+
+                    added = _extract_records_from_dom(dom)
                     pages_collected += 1
-                    logger.info(f"翻页解析完成：已收集 {pages_collected} 页，本页新增记录 {page_added} 条")
-                    if page_added == 0:
+                    logger.info(f"翻页解析完成：已收集 {pages_collected} 页，本页新增/更新记录 {added} 条")
+                    if added == 0:
                         break
             except Exception as e:
                 logger.debug(f"翻页流程出错: {e}")
+
             # 2.2 进一步：基于 lead-details 链接的UID提取（很多卡片/行会包含跳转链接）
             if not records and dom is not None:
                 try:
-                    # 获取当前 lead_trader_id，避免将自身 UID 计入列表
                     current_uid = None
                     try:
                         cur_url = self.driver.current_url
@@ -2503,64 +2570,76 @@ class BinanceCopyTradeScraper:
                                 continue
                             uid_set.add(uid)
                     logger.info(f"基于链接提取到不同 UID 数量: {len(uid_set)}")
-                    # 为这些 UID 构造基本记录
-                    for uid in list(uid_set)[:50]:  # 限制数量避免过多
-                        if not any(r.get('user_id') == str(uid) for r in records):
-                            records.append({
-                                'user_id': str(uid),
-                                'amount': 0.0,
-                                'total_pnl': 0.0,
-                                'total_roi': 0.0,
-                                'duration': 0,
-                                'created_date': date.today().isoformat(),
-                            })
+                    for uid in list(uid_set)[:50]:
+                        _upsert_record({
+                            'user_id': str(uid),
+                            'amount': 0.0,
+                            'total_pnl': 0.0,
+                            'total_roi': 0.0,
+                            'duration': 0,
+                            'created_date': date.today().isoformat(),
+                        })
                 except Exception as e:
                     logger.debug(f"基于链接提取 UID 失败: {e}")
-    
+
             # 3) 若DOM提取为空，尝试从页面源代码中的JSON片段提取
             if not records:
                 try:
-                    # 常见 JSON 结构兜底（字段名可能含有 uid/amount/roi/pnl/duration 等）
                     patterns = [
                         r'"copyTraderList"\s*:\s*\[(\{.*?\})\]\s*,?',
-                        r'\[\{\s*"uid".*?\}\]'
+                        r'"copyTraders"\s*:\s*\[(\{.*?\})\]\s*,?',
+                        r'\[\{\s*"uid"[\s\S]*?\}\]'
                     ]
                     for pat in patterns:
                         m = re.search(pat, html_content, flags=re.I | re.S)
-                        if m:
-                            json_text = m.group(0)
-                            # 尝试提取对象数组
-                            arr_m = re.search(r"\[\s*\{.*?\}\s*\]", json_text, flags=re.S)
-                            if arr_m:
-                                arr_text = arr_m.group(0)
-                                try:
-                                    data_list = json.loads(arr_text)
-                                    for obj in data_list:
-                                        user_id = str(obj.get('uid') or obj.get('userId') or obj.get('user_id') or '')
-                                        if not user_id:
-                                            continue
-                                        duration = obj.get('duration') or obj.get('days')
-                                        amount = obj.get('amount') or obj.get('copyAmount')
-                                        total_pnl = obj.get('pnl') or obj.get('totalPnl')
-                                        total_roi = obj.get('roi') or obj.get('totalRoi') or obj.get('returnRate')
-                                        records.append({
-                                            'user_id': user_id,
-                                            'amount': float(amount) if amount is not None else 0.0,
-                                            'total_pnl': float(total_pnl) if total_pnl is not None else 0.0,
-                                            'total_roi': float(total_roi) if total_roi is not None else 0.0,
-                                            'duration': int(duration) if duration is not None else 0,
-                                            'created_date': date.today().isoformat(),
-                                        })
-                                except Exception as je:
-                                    logger.debug(f"JSON解析失败: {je}")
+                        if not m:
+                            continue
+                        json_text = m.group(0)
+                        arr_m = re.search(r"\[\s*\{[\s\S]*?\}\s*\]", json_text, flags=re.S)
+                        if not arr_m:
+                            continue
+                        arr_text = arr_m.group(0)
+                        try:
+                            data_list = json.loads(arr_text)
+                        except Exception as je:
+                            logger.debug(f"JSON解析失败: {je}")
+                            continue
+                        if isinstance(data_list, dict):
+                            data_list = [data_list]
+                        if not isinstance(data_list, list):
+                            continue
+                        for obj in data_list:
+                            if not isinstance(obj, dict):
+                                continue
+                            user_id = str(
+                                obj.get('uid')
+                                or obj.get('userId')
+                                or obj.get('user_id')
+                                or obj.get('userID')
+                                or ''
+                            ).strip()
+                            if not user_id:
+                                continue
+                            duration = obj.get('duration') or obj.get('days') or obj.get('day')
+                            amount = obj.get('amount') or obj.get('copyAmount') or obj.get('aum')
+                            total_pnl = obj.get('pnl') or obj.get('totalPnl') or obj.get('totalPNL')
+                            total_roi = obj.get('roi') or obj.get('totalRoi') or obj.get('returnRate')
+                            _upsert_record({
+                                'user_id': user_id,
+                                'amount': amount,
+                                'total_pnl': total_pnl,
+                                'total_roi': total_roi,
+                                'duration': duration,
+                                'created_date': date.today().isoformat(),
+                            })
                 except Exception as e:
                     logger.debug(f"JSON兜底提取失败: {e}")
-    
+
         except Exception as e:
             logger.error(f"DOM解析出错: {e}")
-    
+
         logger.info(f"Copy Traders 列表提取记录数: {len(records)}")
-        
+
         # 如果没有提取到数据，创建测试数据以确保上传流程正常工作
         if not records:
             logger.warning("未提取到任何Copy Traders数据，创建测试数据以验证上传流程")
@@ -2573,8 +2652,9 @@ class BinanceCopyTradeScraper:
                 'created_date': date.today().isoformat()
             }
             records.append(test_record)
-        
+
         return records
+
 
     def upload_copy_traders_to_supabase(self, records: List[Dict[str, Any]]):
         """Upload records to Supabase table public.binance_spot_copy_traders via upsert.
@@ -2595,15 +2675,62 @@ class BinanceCopyTradeScraper:
                 logger.debug(f"无效的 duration 值: {dur_val}，将使用 0 作为默认值")
                 duration = 0
 
+            def _normalize_decimal(value: Any) -> Optional[float]:
+                if value is None:
+                    return None
+                if isinstance(value, (int, float)):
+                    return float(value)
+                text = str(value).strip()
+                if not text:
+                    return None
+                text = text.replace(',', '')
+                try:
+                    return float(text)
+                except ValueError:
+                    logger.debug(f"无法转换为浮点数的值: {value}")
+                    return None
+
             cleaned.append({
                 'duration': duration,
-                'user_id': str(r.get('user_id') or ''),
-                'amount': r.get('amount'),
-                'total_pnl': r.get('total_pnl'),
-                'total_roi': r.get('total_roi'),
+                'user_id': str(r.get('user_id') or '').strip(),
+                'amount': _normalize_decimal(r.get('amount')),
+                'total_pnl': _normalize_decimal(r.get('total_pnl')),
+                'total_roi': _normalize_decimal(r.get('total_roi')),
                 'created_date': r.get('created_date') or date.today().isoformat(),
             })
-        # 过滤 user_id 为空的
+
+        # 过滤 user_id 为空的，并按 (user_id, created_date) 去重/合并
+        unique_records: Dict[tuple, Dict[str, Any]] = {}
+        for rec in cleaned:
+            uid = rec.get('user_id')
+            if not uid:
+                continue
+            key = (uid, rec.get('created_date'))
+            if key not in unique_records:
+                unique_records[key] = rec.copy()
+                continue
+            existing = unique_records[key]
+            for field in ['duration', 'amount', 'total_pnl', 'total_roi']:
+                new_val = rec.get(field)
+                if new_val is not None and existing.get(field) != new_val:
+                    existing[field] = new_val
+
+        if not unique_records:
+            logger.info("清洗后没有有效的 Copy Traders 记录可上传")
+            return
+
+        payload = list(unique_records.values())
+
+        try:
+            logger.info(f"上传 {len(payload)} 条 Copy Traders 记录至 {table_name}")
+            self.supabase_client.table(table_name).upsert(
+                payload,
+                on_conflict="user_id,created_date"
+            ).execute()
+            logger.info("Copy Traders 记录上传成功")
+        except Exception as e:
+            logger.error(f"上传 Copy Traders 数据失败: {e}")
+            raise
 
 
 
