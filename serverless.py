@@ -1938,57 +1938,90 @@ class BinanceCopyTradeScraper:
         """Scrape the 'Copy Traders' list from the lead details page."""
         records: List[Dict[str, Any]] = []
         
-        # 验证当前页面是否为正确的 Binance 页面
-        current_url = self.driver.current_url
-        if "farside.co.uk" in current_url or "bitcoin-etf" in current_url:
-            logger.error("错误：当前在比特币ETF数据页面，无法提取Copy Traders数据")
-            logger.info("尝试导航到正确的Binance Copy Trading页面...")
-            
-            # 从原始URL中提取lead trader ID
-            from urllib.parse import urlparse
-            parsed_url = urlparse(self.url)
-            path_parts = parsed_url.path.strip('/').split('/')
-            
-            lead_trader_id = None
-            for part in path_parts:
-                if part.isdigit() and len(part) > 10:  # lead_trader_id通常是一个长数字
-                    lead_trader_id = part
-                    break
-        
-            # 导航到正确的页面
-            try:
-                if lead_trader_id:
-                    correct_url = f"https://www.binance.com/en/copy-trading/lead-details/{lead_trader_id}?timeRange=180D"
-                    logger.info(f"导航到正确的URL: {correct_url}")
-                    self.driver.get(correct_url)
-                    time.sleep(5)  # 等待页面加载
-                else:
-                    # 如果无法提取ID，则导航到默认的Copy Trading页面
-                    binance_url = "https://www.binance.com/en/copy-trading"
-                    self.driver.get(binance_url)
-                    time.sleep(5)
-                    logger.info(f"已导航到默认页面: {self.driver.current_url}")
-                    
-                    # 如果是主页，尝试找到并点击特定的交易员
-                    try:
-                        # 等待并点击第一个交易员
-                        first_trader = WebDriverWait(self.driver, 10).until(
-                            EC.element_to_be_clickable((By.XPATH, "//a[contains(@href, 'lead-details')]"))
-                        )
-                        first_trader.click()
-                        time.sleep(3)
-                        logger.info("已点击第一个交易员链接")
-                    except Exception as e:
-                        logger.warning(f"无法点击交易员链接: {e}")
-            except Exception as e:
-                logger.error(f"导航到正确页面失败: {e}")
-                return records
-    
-        # 检查是否在正确的页面
-        if "binance.com" not in self.driver.current_url:
-            logger.error(f"不在Binance网站上，当前URL: {self.driver.current_url}")
+        if not self.driver:
+            logger.error("WebDriver not provided to BinanceCopyTradeScraper.")
             return records
-        
+
+        if not self.url:
+            logger.error("未提供 Binance Copy Trading 页面 URL，无法抓取数据。")
+            return records
+
+        # 确保浏览器已导航到目标的 Binance Copy Trading 页面
+        from urllib.parse import urlparse
+
+        target_lead_id = None
+        try:
+            parsed_target = urlparse(self.url)
+            for part in parsed_target.path.strip('/').split('/'):
+                if part.isdigit() and len(part) > 10:
+                    target_lead_id = part
+                    break
+        except Exception:
+            target_lead_id = None
+
+        try:
+            current_url = ""
+            try:
+                current_url = self.driver.current_url or ""
+            except Exception:
+                current_url = ""
+
+            needs_navigation = (
+                ("binance.com" not in current_url.lower())
+                or (target_lead_id and target_lead_id not in current_url)
+            )
+
+            if needs_navigation:
+                logger.info(
+                    "导航到 Binance Copy Trading 页面: %s (当前URL: %s)",
+                    self.url,
+                    current_url or "<empty>"
+                )
+                self.driver.get(self.url)
+                time.sleep(5)  # 等待页面加载
+                current_url = self.driver.current_url or ""
+
+            # 如果仍然没有导航到正确的页面，则尝试构造规范 URL
+            if target_lead_id and target_lead_id not in current_url:
+                canonical_url = (
+                    f"https://www.binance.com/en/copy-trading/lead-details/{target_lead_id}?timeRange=180D"
+                )
+                if canonical_url != self.url:
+                    logger.info("尝试使用规范化URL导航: %s", canonical_url)
+                    self.driver.get(canonical_url)
+                    time.sleep(5)
+                    current_url = self.driver.current_url or ""
+
+            if "binance.com" not in current_url.lower():
+                try:
+                    fallback_url = "https://www.binance.com/en/copy-trading"
+                    logger.info("尝试导航到默认的 Copy Trading 页面: %s", fallback_url)
+                    self.driver.get(fallback_url)
+                    time.sleep(5)
+                    current_url = self.driver.current_url or ""
+
+                    if "binance.com" in current_url.lower() and not target_lead_id:
+                        try:
+                            first_trader = WebDriverWait(self.driver, 10).until(
+                                EC.element_to_be_clickable((By.XPATH, "//a[contains(@href, 'lead-details')]"))
+                            )
+                            first_trader.click()
+                            time.sleep(3)
+                            current_url = self.driver.current_url or ""
+                            logger.info("已在默认页面点击第一个交易员链接")
+                        except Exception as click_err:
+                            logger.warning(f"在默认页面点击交易员链接失败: {click_err}")
+                except Exception as nav_err:
+                    logger.error(f"尝试导航到默认 Copy Trading 页面失败: {nav_err}")
+
+            if "binance.com" not in current_url.lower():
+                logger.error(f"导航到 Binance 页面失败，当前URL: {current_url}")
+                return records
+
+        except Exception as e:
+            logger.error(f"导航到 Binance Copy Trading 页面失败: {e}")
+            return records
+
         # 等待页面加载完成
         try:
             WebDriverWait(self.driver, 10).until(
