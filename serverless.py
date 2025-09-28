@@ -559,10 +559,10 @@ class BitcoinETFScraper:
                             try:
                                 value = self._parse_number(cell_texts[col_index])
                                 if value is not None:
-                                    logger.info(f"col_index: {col_index}, field_name: {field_name}, value: {value}")
+                                    # logger.info(f"col_index: {col_index}, field_name: {field_name}, value: {value}")
                                     row_data[field_name] = value
-                                else:
-                                    logger.info(f"col_index: {col_index}, field_name: {field_name}, value: None (无法解析)")
+                                # else:
+                                #     logger.info(f"col_index: {col_index}, field_name: {field_name}, value: None (无法解析)")
                             except Exception as e:
                                 logger.warning(f"处理列 {col_index} 时出错: {e}")
 
@@ -2604,48 +2604,8 @@ class BinanceCopyTradeScraper:
                 'created_date': r.get('created_date') or date.today().isoformat(),
             })
         # 过滤 user_id 为空的
-#!/usr/bin/env python3
-"""
-Fixed Bitcoin ETF Flow Data Scraper
-Extracts Bitcoin ETF flow data from farside.co.uk and updates Supabase database
-"""
 
-import json
-import re
-#from dotenv import load_dotenv
-import logging
-import math
-from datetime import datetime, date, timedelta
-import time
-import random
-from typing import Dict, List, Optional, Any
-import requests
-from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import TimeoutException, WebDriverException
-from selenium.webdriver.common.keys import Keys
-from supabase import create_client, Client
-import config
-import os
-import zipfile
-from urllib.parse import urlparse, parse_qs
-import shutil
-import platform
-import stat
-import shutil
-from lxml import etree
 
-# Import the scraper classes
-
-# In serverless environments, use /tmp for writable storage
-# 但在阿里云函数计算平台，我们也需要支持项目目录下的chromedriver
-WRITABLE_DIR = '/tmp/bin'
-PROJECT_BIN_DIR = './bin'  # 项目目录下的bin文件夹
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
