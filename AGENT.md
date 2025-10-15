@@ -1,4 +1,4 @@
-## 1.用brightdata browser api 爬取币安现货带单项目主要数据
+## 1.用brightdata mcp server browser 选项 爬取币安现货带单项目主要数据
 URL：https://www.binance.com/en/copy-trading/lead-details/4458914342020236800?timeRange=180D
 ### 1.1 爬取概览信息
 data schema: 
