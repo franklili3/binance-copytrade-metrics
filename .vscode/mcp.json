@@ -1,0 +1,9 @@
+{
+    "servers": {
+        "brightdata-mcp": {
+            "type": "stdio",
+            "command": "npx@brightdata/mcp",
+            "args": []
+        }
+    }
+}
