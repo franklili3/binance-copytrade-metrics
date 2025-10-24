@@ -1,0 +1,108 @@
+{
+  "name": "Extract Lead Portfolio ID from Binance",
+  "nodes": [
+    {
+      "parameters": {
+        "url": "https://www.binance.com/en/futures-activity/leaderboard/copy-trade",
+        "options": {}
+      },
+      "id": "Get Binance Page",
+      "name": "HTTP Request",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        450,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "readValueWithExpression",
+        "selector": "script#__APP_DATA",
+        "attribute": "innerHTML"
+      },
+      "id": "Extract APP_DATA",
+      "name": "HTML",
+      "type": "n8n-nodes-base.html",
+      "typeVersion": 1,
+      "position": [
+        650,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "function parseJsonFromScript(jsonString) {\n  try {\n    // 提取window.__APP_DATA__赋值的JSON部分\n    const match = jsonString.match(/window\\.__APP_DATA__ = (.*?);/);\n    if (match && match[1]) {\n      return JSON.parse(match[1]);\n    }\n    return null;\n  } catch (error) {\n    console.error('Error parsing JSON:', error);\n    return null;\n  }\n}\n\nreturn items.map(item => {\n  const parsedJson = parseJsonFromScript(item.json[\"script#__APP_DATA\"][\"innerHTML\"]);\n  \n  return {\n    json: {\n      ...item.json,\n      parsedJson\n    }\n  };\n});"
+      },
+      "id": "Parse JSON",
+      "name": "Function",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        850,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "leadPortfolioId",
+              "value": "={{$json.parsedJson.routeProps.data.leadPortfolioId}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "Set leadPortfolioId",
+      "name": "Set",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [
+        1050,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTML": {
+      "main": [
+        [
+          {
+            "node": "Function",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function": {
+      "main": [
+        [
+          {
+            "node": "Set",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "example"
+}
